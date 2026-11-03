@@ -1,71 +1,113 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.metrics import confusion_matrix
-
-
-# ==================================================
-# 1. 기본 설정
-# ==================================================
-
-st.title("🚀 성능 높이기")
-
-st.write(
-    "뇌졸중 환자는 전체 사람 중 아주 적습니다. "
-    "두 종류의 사람을 똑같이 취급하는 대신, "
-    "뇌졸중 환자에게 더 큰 가중치를 주면 "
-    "결과가 어떻게 달라지는지 비교합니다."
+from sklearn.metrics import (
+    confusion_matrix,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score
 )
+
+
+# --------------------------------------------------
+# 1. 기본 설정
+# --------------------------------------------------
+
+st.set_page_config(
+    page_title="성능 높이기",
+    page_icon="⚖️",
+    layout="wide"
+)
+
+st.title("⚖️ 성능 높이기")
+
+st.markdown("""
+뇌졸중 환자는 전체 데이터에서 매우 드뭅니다.
+
+이 페이지에서는 두 모델의 가중치를 조정하기 전과 후를 비교합니다.
+가중치를 조정하면 뇌졸중 환자를 더 잘 찾아낼 수 있을까요?
+""")
 
 DATA_URL = (
     "https://raw.githubusercontent.com/"
     "greatsong/modudata/main/data/stroke.csv"
 )
 
+
+# --------------------------------------------------
+# 2. 입력 속성 선택
+# --------------------------------------------------
+
 FEATURE_LABELS = {
     "age": "나이",
     "avg_glucose_level": "평균 혈당",
-    "bmi": "체질량지수",
-    "hypertension": "고혈압",
-    "heart_disease": "심장병",
+    "bmi": "체질량지수(BMI)",
+    "hypertension": "고혈압 여부",
+    "heart_disease": "심장병 여부"
 }
 
-MODEL_NAMES = {
-    "logistic": "로지스틱 회귀(확률로 답하는 모델)",
-    "tree": "의사결정트리(질문으로 답하는 모델)",
-}
+ALL_FEATURES = list(FEATURE_LABELS.keys())
+
+DEFAULT_FEATURES = [
+    "age",
+    "avg_glucose_level",
+    "hypertension",
+    "heart_disease"
+]
+
+st.subheader("① 입력 속성 선택")
+
+selected_features = st.multiselect(
+    "모델이 뇌졸중을 예측할 때 사용할 속성을 선택하세요.",
+    options=ALL_FEATURES,
+    default=DEFAULT_FEATURES,
+    format_func=lambda x: FEATURE_LABELS[x]
+)
+
+if len(selected_features) < 2:
+    st.warning("속성을 두 가지 이상 선택해 주세요.")
+    st.stop()
+
+st.caption(
+    "선택한 속성: "
+    + ", ".join(FEATURE_LABELS[x] for x in selected_features)
+)
 
 
-# ==================================================
-# 2. 데이터 읽기
-# ==================================================
+# --------------------------------------------------
+# 3. 데이터 불러오기
+# --------------------------------------------------
 
 @st.cache_data
 def load_data():
-
     data = pd.read_csv(DATA_URL, encoding="utf-8")
 
-    required_columns = [
+    numeric_columns = [
         "id",
         "age",
         "avg_glucose_level",
         "bmi",
         "hypertension",
         "heart_disease",
-        "stroke",
+        "stroke"
     ]
 
-    for col in required_columns:
+    for col in numeric_columns:
         data[col] = pd.to_numeric(
             data[col],
             errors="coerce"
         )
 
+    # BMI 이외의 필수 항목에 결측값이 있는 행 제거
     data = data.dropna(
         subset=[
             "id",
@@ -73,1065 +115,786 @@ def load_data():
             "avg_glucose_level",
             "hypertension",
             "heart_disease",
-            "stroke",
+            "stroke"
         ]
-    ).copy()
+    )
 
-    data = data.sort_values(
-        "id",
-        kind="stable"
-    ).reset_index(drop=True)
+    # id 순서대로 정렬
+    data = data.sort_values("id").reset_index(drop=True)
 
     return data
 
 
-# ==================================================
-# 3. 데이터 나누기
-# ==================================================
-
-def split_data(data):
-
-    test_mask = np.arange(len(data)) % 10 < 3
-
-    train_data = data.loc[~test_mask].copy()
-    test_data = data.loc[test_mask].copy()
-
-    return train_data, test_data
+try:
+    data = load_data()
+except Exception as e:
+    st.error(f"데이터를 불러오지 못했습니다: {e}")
+    st.stop()
 
 
-# ==================================================
-# 4. 평가 지표 계산
-# ==================================================
+# --------------------------------------------------
+# 4. 훈련용 / 테스트용 데이터 나누기
+# --------------------------------------------------
 
-def calculate_scores(y_true, y_pred):
+# 10개씩 묶어서 앞의 3개는 테스트용,
+# 나머지 7개는 훈련용으로 사용
+test_mask = np.arange(len(data)) % 10 < 3
+
+train_data = data.loc[~test_mask].copy()
+test_data = data.loc[test_mask].copy()
+
+X_train = train_data[selected_features].copy()
+X_test = test_data[selected_features].copy()
+
+y_train = train_data["stroke"].astype(int)
+y_test = test_data["stroke"].astype(int)
+
+
+# --------------------------------------------------
+# 5. BMI 결측값 처리
+# --------------------------------------------------
+
+# 중앙값은 반드시 훈련 데이터에서만 계산
+train_medians = X_train.median()
+
+if "bmi" in selected_features:
+    bmi_median = X_train["bmi"].median()
+
+    X_train["bmi"] = X_train["bmi"].fillna(bmi_median)
+    X_test["bmi"] = X_test["bmi"].fillna(bmi_median)
+
+# 나머지 속성의 결측값도 훈련용 중앙값으로 처리
+X_train = X_train.fillna(train_medians)
+X_test = X_test.fillna(train_medians)
+
+# 시각화에서 다른 속성을 고정할 때 사용할 중앙값
+train_medians = X_train.median()
+
+
+# --------------------------------------------------
+# 6. 데이터 현황
+# --------------------------------------------------
+
+st.subheader("② 데이터 확인")
+
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric("전체 데이터", f"{len(data):,}명")
+col2.metric("훈련 데이터", f"{len(train_data):,}명")
+col3.metric("테스트 데이터", f"{len(test_data):,}명")
+col4.metric(
+    "테스트용 뇌졸중 환자",
+    f"{int(y_test.sum()):,}명"
+)
+
+st.caption(
+    "뇌졸중 여부: 1은 뇌졸중, 0은 뇌졸중 아님. "
+    "테스트 데이터는 두 모델 모두 동일하게 사용합니다."
+)
+
+
+# --------------------------------------------------
+# 7. 모델 만들기
+# --------------------------------------------------
+
+st.subheader("③ 가중치 조정 전후 모델 비교")
+
+# 가중치 조정 전 로지스틱 회귀
+logistic_before = Pipeline([
+    ("scaler", StandardScaler()),
+    ("model", LogisticRegression(max_iter=2000))
+])
+
+# 가중치 조정 후 로지스틱 회귀
+logistic_after = Pipeline([
+    ("scaler", StandardScaler()),
+    ("model", LogisticRegression(
+        max_iter=2000,
+        class_weight="balanced"
+    ))
+])
+
+# 가중치 조정 전 의사결정트리
+tree_before = DecisionTreeClassifier(
+    max_depth=3,
+    min_samples_leaf=5,
+    random_state=42
+)
+
+# 가중치 조정 후 의사결정트리
+tree_after = DecisionTreeClassifier(
+    max_depth=3,
+    min_samples_leaf=5,
+    random_state=42,
+    class_weight="balanced"
+)
+
+
+# 훈련
+logistic_before.fit(X_train, y_train)
+logistic_after.fit(X_train, y_train)
+
+tree_before.fit(X_train, y_train)
+tree_after.fit(X_train, y_train)
+
+
+# --------------------------------------------------
+# 8. 예측 및 평가
+# --------------------------------------------------
+
+models = {
+    "logistic": {
+        "before": logistic_before,
+        "after": logistic_after
+    },
+    "tree": {
+        "before": tree_before,
+        "after": tree_after
+    }
+}
+
+
+def evaluate_model(model, X, y):
+    predictions = model.predict(X)
 
     tn, fp, fn, tp = confusion_matrix(
-        y_true,
-        y_pred,
+        y,
+        predictions,
         labels=[0, 1]
     ).ravel()
 
-    total = tn + fp + fn + tp
-
-    accuracy = (
-        (tp + tn) / total
-        if total > 0 else 0
-    )
-
-    actual_positive = tp + fn
-
-    recall = (
-        tp / actual_positive
-        if actual_positive > 0 else None
-    )
-
-    predicted_positive = tp + fp
-
-    precision = (
-        tp / predicted_positive
-        if predicted_positive > 0 else None
-    )
-
-    if (
-        precision is None
-        or recall is None
-        or precision + recall == 0
-    ):
-        f1 = None
-    else:
-        f1 = (
-            2 * precision * recall
-            / (precision + recall)
-        )
-
-    return {
+    metrics = {
         "TN": int(tn),
         "FP": int(fp),
         "FN": int(fn),
         "TP": int(tp),
-        "정확도": accuracy,
-        "재현율": recall,
-        "정밀도": precision,
-        "F1": f1,
+        "정확도": accuracy_score(y, predictions),
+        "정밀도": precision_score(
+            y, predictions, zero_division=0
+        ),
+        "재현율": recall_score(
+            y, predictions, zero_division=0
+        ),
+        "F1 점수": f1_score(
+            y, predictions, zero_division=0
+        )
+    }
+
+    return metrics
+
+
+results = {}
+
+for model_key, model_pair in models.items():
+    results[model_key] = {
+        "before": evaluate_model(
+            model_pair["before"], X_test, y_test
+        ),
+        "after": evaluate_model(
+            model_pair["after"], X_test, y_test
+        )
     }
 
 
-def format_score(value):
-
-    if value is None:
-        return "계산할 수 없음"
-
-    return f"{value:.4f}"
-
-
-# ==================================================
-# 5. 모델 학습
-# ==================================================
-
-def train_models(X_train, X_test, y_train):
-
-    X_train = X_train.copy()
-    X_test = X_test.copy()
-
-    # BMI 결측값은 훈련용 중앙값으로 채우기
-    if "bmi" in X_train.columns:
-
-        bmi_median = X_train["bmi"].median()
-
-        if pd.isna(bmi_median):
-            raise ValueError(
-                "훈련용 체질량지수에 유효한 값이 없습니다."
-            )
-
-        X_train["bmi"] = X_train["bmi"].fillna(
-            bmi_median
-        )
-
-        X_test["bmi"] = X_test["bmi"].fillna(
-            bmi_median
-        )
-
-    # 로지스틱 회귀용 표준화
-    scaler = StandardScaler()
-
-    X_train_scaled = scaler.fit_transform(X_train)
-
-    # --------------------------------------------------
-    # 로지스틱 회귀: 가중치 조정 전
-    # --------------------------------------------------
-
-    logistic_before = LogisticRegression(
-        max_iter=2000,
-        random_state=42
-    )
-
-    logistic_before.fit(
-        X_train_scaled,
-        y_train
-    )
-
-    # --------------------------------------------------
-    # 로지스틱 회귀: 가중치 조정 후
-    # --------------------------------------------------
-
-    logistic_after = LogisticRegression(
-        max_iter=2000,
-        class_weight="balanced",
-        random_state=42
-    )
-
-    logistic_after.fit(
-        X_train_scaled,
-        y_train
-    )
-
-    # --------------------------------------------------
-    # 의사결정트리: 가중치 조정 전
-    # --------------------------------------------------
-
-    tree_before = DecisionTreeClassifier(
-        max_depth=3,
-        min_samples_leaf=5,
-        random_state=42
-    )
-
-    tree_before.fit(
-        X_train,
-        y_train
-    )
-
-    # --------------------------------------------------
-    # 의사결정트리: 가중치 조정 후
-    # --------------------------------------------------
-
-    tree_after = DecisionTreeClassifier(
-        max_depth=3,
-        min_samples_leaf=5,
-        class_weight="balanced",
-        random_state=42
-    )
-
-    tree_after.fit(
-        X_train,
-        y_train
-    )
-
-    models = {
-        "logistic": {
-            "before": logistic_before,
-            "after": logistic_after,
-        },
-        "tree": {
-            "before": tree_before,
-            "after": tree_after,
-        }
-    }
-
-    return models, scaler, X_train, X_test
-
-
-# ==================================================
-# 6. 확률 예측
-# ==================================================
-
-def get_probability(
-    model,
-    X,
-    model_type,
-    scaler
-):
-
-    if model_type == "logistic":
-        X_input = scaler.transform(X)
-    else:
-        X_input = X
-
-    probabilities = model.predict_proba(X_input)
-
-    positive_index = list(model.classes_).index(1)
-
-    return probabilities[:, positive_index]
-
-
-# ==================================================
-# 7. 비교 표 만들기
-# ==================================================
+# --------------------------------------------------
+# 9. 비교 표 만들기
+# --------------------------------------------------
 
 def make_comparison_table(before, after):
 
     rows = [
-        ("TN: 제대로 맞힌 음성", "TN"),
-        ("FP: 헛짚은 사람", "FP"),
-        ("FN: 놓친 환자", "FN"),
-        ("TP: 찾아낸 환자", "TP"),
+        ("참음성 (TN)", "TN"),
+        ("거짓양성 (FP)", "FP"),
+        ("거짓음성 (FN)", "FN"),
+        ("참양성 (TP)", "TP"),
         ("정확도", "정확도"),
-        ("재현율", "재현율"),
         ("정밀도", "정밀도"),
-        ("F1", "F1"),
+        ("재현율", "재현율"),
+        ("F1 점수", "F1 점수")
     ]
 
-    result = []
+    table_data = []
 
     for label, key in rows:
-
         if key in ["TN", "FP", "FN", "TP"]:
-
             before_value = f"{before[key]:,}명"
             after_value = f"{after[key]:,}명"
-
         else:
+            before_value = f"{before[key]:.3f}"
+            after_value = f"{after[key]:.3f}"
 
-            before_value = format_score(before[key])
-            after_value = format_score(after[key])
-
-        result.append({
+        table_data.append({
             "평가 항목": label,
             "가중치 조정 전": before_value,
-            "가중치 조정 후": after_value,
+            "가중치 조정 후": after_value
         })
 
-    return pd.DataFrame(result)
+    return pd.DataFrame(table_data)
 
 
-def show_change(before, after):
+def show_model_comparison(title, before, after):
 
-    st.info(
-        f"찾아낸 환자(TP): {before['TP']:,}명 → {after['TP']:,}명"
-        f"  |  놓친 환자(FN): {before['FN']:,}명 → {after['FN']:,}명"
-        f"  |  헛짚은 사람(FP): {before['FP']:,}명 → {after['FP']:,}명"
+    st.markdown(f"### {title}")
+
+    table = make_comparison_table(before, after)
+
+    st.dataframe(
+        table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # 환자 수 비교
+    tp_before = before["TP"]
+    tp_after = after["TP"]
+
+    fn_before = before["FN"]
+    fn_after = after["FN"]
+
+    fp_before = before["FP"]
+    fp_after = after["FP"]
+
+    st.markdown(
+        f"**찾아낸 환자 수:** {tp_before:,}명 → {tp_after:,}명"
+        f"　|　"
+        f"**놓친 환자 수:** {fn_before:,}명 → {fn_after:,}명"
+        f"　|　"
+        f"**헛짚은 사람 수:** {fp_before:,}명 → {fp_after:,}명"
     )
 
 
-# ==================================================
-# 8. 2차원 산점도와 경계선
-# ==================================================
+col1, col2 = st.columns(2)
 
-def make_2d_chart(
-    X_test,
-    y_test,
-    models,
-    scaler,
-    features,
-    model_type
-):
-
-    x_feature, y_feature = features
-
-    x_min = X_test[x_feature].min()
-    x_max = X_test[x_feature].max()
-
-    y_min = X_test[y_feature].min()
-    y_max = X_test[y_feature].max()
-
-    x_padding = max((x_max - x_min) * 0.08, 0.1)
-    y_padding = max((y_max - y_min) * 0.08, 0.1)
-
-    x_values = np.linspace(
-        x_min - x_padding,
-        x_max + x_padding,
-        100
+with col1:
+    show_model_comparison(
+        "로지스틱 회귀(확률로 답하는 모델)",
+        results["logistic"]["before"],
+        results["logistic"]["after"]
     )
 
-    y_values = np.linspace(
-        y_min - y_padding,
-        y_max + y_padding,
-        100
+with col2:
+    show_model_comparison(
+        "의사결정트리(질문으로 답하는 모델)",
+        results["tree"]["before"],
+        results["tree"]["after"]
     )
 
-    xx, yy = np.meshgrid(
-        x_values,
-        y_values
-    )
 
-    # 다른 속성은 테스트 데이터 중앙값으로 고정
+st.info("""
+**표 읽는 방법**
+
+- 참양성(TP): 실제 뇌졸중 환자를 환자로 찾아낸 사람
+- 거짓음성(FN): 실제 뇌졸중 환자를 놓친 사람
+- 거짓양성(FP): 뇌졸중이 아닌데 환자라고 예측한 사람
+- 참음성(TN): 뇌졸중이 아닌 사람을 정확하게 예측한 사람
+
+정확도만 보는 것보다 실제 환자를 얼마나 찾아냈는지 보여 주는
+재현율도 중요합니다.
+""")
+
+
+# --------------------------------------------------
+# 10. 경계선 시각화용 함수
+# --------------------------------------------------
+
+def get_logistic_probability(model, x_values, y_values,
+                             x_feature, y_feature):
+
+    # 나머지 속성은 훈련 데이터 중앙값으로 고정
     grid = pd.DataFrame(
         np.tile(
-            X_test.median().values,
-            (xx.size, 1)
+            train_medians[selected_features].values,
+            (len(x_values) * len(y_values), 1)
         ),
-        columns=X_test.columns
+        columns=selected_features
     )
+
+    xx, yy = np.meshgrid(x_values, y_values)
 
     grid[x_feature] = xx.ravel()
     grid[y_feature] = yy.ravel()
 
-    grid_before = get_probability(
-        models["before"],
-        grid,
-        model_type,
-        scaler
-    ).reshape(xx.shape)
+    probabilities = model.predict_proba(grid)[:, 1]
 
-    grid_after = get_probability(
-        models["after"],
-        grid,
-        model_type,
-        scaler
-    ).reshape(xx.shape)
+    return probabilities.reshape(xx.shape)
 
-    fig = go.Figure()
 
-    # 실제 뇌졸중이 아닌 사람
-    negative = y_test == 0
+def get_logistic_equation(model):
 
-    fig.add_trace(
-        go.Scatter(
-            x=X_test.loc[negative, x_feature],
-            y=X_test.loc[negative, y_feature],
-            mode="markers",
-            name="실제 뇌졸중 아님",
-            marker=dict(
-                color="#3498DB",
-                size=6,
-                opacity=0.55
-            )
+    scaler = model.named_steps["scaler"]
+    classifier = model.named_steps["model"]
+
+    coefficients = (
+        classifier.coef_[0] / scaler.scale_
+    )
+
+    intercept = (
+        classifier.intercept_[0]
+        - np.sum(
+            classifier.coef_[0]
+            * scaler.mean_
+            / scaler.scale_
         )
     )
 
-    # 실제 뇌졸중인 사람
-    positive = y_test == 1
+    return coefficients, intercept
 
-    fig.add_trace(
-        go.Scatter(
-            x=X_test.loc[positive, x_feature],
-            y=X_test.loc[positive, y_feature],
-            mode="markers",
-            name="실제 뇌졸중",
-            marker=dict(
-                color="#E74C3C",
-                size=8,
-                opacity=0.85,
-                symbol="diamond"
-            )
+
+# --------------------------------------------------
+# 11. 2차원 산점도
+# --------------------------------------------------
+
+st.divider()
+st.subheader("④ 실제 뇌졸중 여부와 0.5 경계선 비교")
+
+st.markdown("""
+테스트 데이터의 실제 뇌졸중 여부를 점의 색으로 표시합니다.
+
+로지스틱 회귀 모델의 예측 확률이 0.5가 되는 경계선을
+가중치 조정 전후로 겹쳐서 비교합니다.
+""")
+
+axis_col1, axis_col2 = st.columns(2)
+
+with axis_col1:
+    x_feature = st.selectbox(
+        "가로축 속성",
+        options=selected_features,
+        format_func=lambda x: FEATURE_LABELS[x],
+        index=0
+    )
+
+with axis_col2:
+    available_y = [
+        f for f in selected_features
+        if f != x_feature
+    ]
+
+    y_feature = st.selectbox(
+        "세로축 속성",
+        options=available_y,
+        format_func=lambda x: FEATURE_LABELS[x],
+        index=0
+    )
+
+
+# 축 범위 설정
+x_min = float(X_test[x_feature].min())
+x_max = float(X_test[x_feature].max())
+
+y_min = float(X_test[y_feature].min())
+y_max = float(X_test[y_feature].max())
+
+# 같은 값만 있는 경우 범위 확장
+if x_min == x_max:
+    x_min -= 0.5
+    x_max += 0.5
+
+if y_min == y_max:
+    y_min -= 0.5
+    y_max += 0.5
+
+x_values = np.linspace(x_min, x_max, 100)
+y_values = np.linspace(y_min, y_max, 100)
+
+prob_before = get_logistic_probability(
+    logistic_before,
+    x_values,
+    y_values,
+    x_feature,
+    y_feature
+)
+
+prob_after = get_logistic_probability(
+    logistic_after,
+    x_values,
+    y_values,
+    x_feature,
+    y_feature
+)
+
+
+fig2d = go.Figure()
+
+
+# 실제 뇌졸중이 아닌 사람
+negative = y_test == 0
+
+fig2d.add_trace(
+    go.Scatter(
+        x=X_test.loc[negative, x_feature],
+        y=X_test.loc[negative, y_feature],
+        mode="markers",
+        name="실제 뇌졸중 아님",
+        marker=dict(
+            color="#3498db",
+            size=7,
+            opacity=0.6
+        ),
+        hovertemplate=(
+            "가로축: %{x}<br>"
+            "세로축: %{y}<br>"
+            "실제 결과: 뇌졸중 아님"
+            "<extra></extra>"
         )
     )
+)
 
-    # 경계선이 그림 안에 있는지 확인
-    before_inside = (
-        np.min(grid_before) <= 0.5
-        <= np.max(grid_before)
+
+# 실제 뇌졸중 환자
+positive = y_test == 1
+
+fig2d.add_trace(
+    go.Scatter(
+        x=X_test.loc[positive, x_feature],
+        y=X_test.loc[positive, y_feature],
+        mode="markers",
+        name="실제 뇌졸중",
+        marker=dict(
+            color="#e74c3c",
+            size=9,
+            opacity=0.85,
+            symbol="circle"
+        ),
+        hovertemplate=(
+            "가로축: %{x}<br>"
+            "세로축: %{y}<br>"
+            "실제 결과: 뇌졸중"
+            "<extra></extra>"
+        )
     )
+)
 
-    after_inside = (
-        np.min(grid_after) <= 0.5
-        <= np.max(grid_after)
-    )
 
-    # 가중치 조정 전 경계선
-    if before_inside:
+# 0.5 경계선 표시
+def add_boundary_2d(fig, probabilities, name, color):
 
+    min_prob = float(np.min(probabilities))
+    max_prob = float(np.max(probabilities))
+
+    if min_prob <= 0.5 <= max_prob:
         fig.add_trace(
             go.Contour(
                 x=x_values,
                 y=y_values,
-                z=grid_before,
+                z=probabilities,
+                name=name,
+                showscale=False,
+                showlegend=True,
                 contours=dict(
                     start=0.5,
                     end=0.5,
-                    size=1
+                    size=0.01,
+                    coloring="none"
                 ),
-                showscale=False,
-                name="가중치 조정 전 0.5 경계선",
                 line=dict(
-                    color="#E67E22",
-                    width=4
-                ),
-                hoverinfo="skip"
-            )
-        )
-
-    # 가중치 조정 후 경계선
-    if after_inside:
-
-        fig.add_trace(
-            go.Contour(
-                x=x_values,
-                y=y_values,
-                z=grid_after,
-                contours=dict(
-                    start=0.5,
-                    end=0.5,
-                    size=1
-                ),
-                showscale=False,
-                name="가중치 조정 후 0.5 경계선",
-                line=dict(
-                    color="#16A085",
-                    width=4,
+                    color=color,
+                    width=3,
                     dash="dash"
                 ),
                 hoverinfo="skip"
             )
         )
+        return True
 
-    fig.update_layout(
-        title="실제 뇌졸중 여부와 0.5 경계선",
-        xaxis_title=FEATURE_LABELS[x_feature],
-        yaxis_title=FEATURE_LABELS[y_feature],
-        legend_title="범례",
-        height=650,
-        template="plotly_white"
-    )
-
-    return fig, before_inside, after_inside
+    return False
 
 
-# ==================================================
-# 9. 3차원 산점도와 0.5 경계면
-# ==================================================
-
-def make_3d_chart(
-    X_test,
-    y_test,
-    models,
-    scaler,
-    features,
-    model_type
-):
-
-    x_feature, y_feature, z_feature = features
-
-    # 그림의 범위
-    x_min = X_test[x_feature].min()
-    x_max = X_test[x_feature].max()
-
-    y_min = X_test[y_feature].min()
-    y_max = X_test[y_feature].max()
-
-    z_min = X_test[z_feature].min()
-    z_max = X_test[z_feature].max()
-
-    def make_range(minimum, maximum):
-
-        padding = max(
-            (maximum - minimum) * 0.05,
-            0.1
-        )
-
-        return np.linspace(
-            minimum - padding,
-            maximum + padding,
-            22
-        )
-
-    x_values = make_range(x_min, x_max)
-    y_values = make_range(y_min, y_max)
-    z_values = make_range(z_min, z_max)
-
-    xx, yy, zz = np.meshgrid(
-        x_values,
-        y_values,
-        z_values,
-        indexing="ij"
-    )
-
-    # 선택하지 않은 나머지 속성은 중앙값으로 고정
-    grid = pd.DataFrame(
-        np.tile(
-            X_test.median().values,
-            (xx.size, 1)
-        ),
-        columns=X_test.columns
-    )
-
-    grid[x_feature] = xx.ravel()
-    grid[y_feature] = yy.ravel()
-    grid[z_feature] = zz.ravel()
-
-    before_probability = get_probability(
-        models["before"],
-        grid,
-        model_type,
-        scaler
-    )
-
-    after_probability = get_probability(
-        models["after"],
-        grid,
-        model_type,
-        scaler
-    )
-
-    before_inside = (
-        np.min(before_probability) <= 0.5
-        <= np.max(before_probability)
-    )
-
-    after_inside = (
-        np.min(after_probability) <= 0.5
-        <= np.max(after_probability)
-    )
-
-    fig = go.Figure()
-
-    # 실제 뇌졸중이 아닌 사람
-    negative = y_test == 0
-
-    fig.add_trace(
-        go.Scatter3d(
-            x=X_test.loc[negative, x_feature],
-            y=X_test.loc[negative, y_feature],
-            z=X_test.loc[negative, z_feature],
-            mode="markers",
-            name="실제 뇌졸중 아님",
-            marker=dict(
-                color="#3498DB",
-                size=4,
-                opacity=0.5
-            )
-        )
-    )
-
-    # 실제 뇌졸중인 사람
-    positive = y_test == 1
-
-    fig.add_trace(
-        go.Scatter3d(
-            x=X_test.loc[positive, x_feature],
-            y=X_test.loc[positive, y_feature],
-            z=X_test.loc[positive, z_feature],
-            mode="markers",
-            name="실제 뇌졸중",
-            marker=dict(
-                color="#E74C3C",
-                size=5,
-                opacity=0.9,
-                symbol="diamond"
-            )
-        )
-    )
-
-    # 가중치 조정 전 0.5 경계면
-    if before_inside:
-
-        fig.add_trace(
-            go.Isosurface(
-                x=xx.ravel(),
-                y=yy.ravel(),
-                z=zz.ravel(),
-                value=before_probability,
-                isomin=0.5,
-                isomax=0.5,
-                surface_count=1,
-                caps=dict(
-                    x_show=False,
-                    y_show=False,
-                    z_show=False
-                ),
-                colorscale=[
-                    [0, "#E67E22"],
-                    [1, "#E67E22"]
-                ],
-                showscale=False,
-                opacity=0.45,
-                name="가중치 조정 전 0.5 경계면",
-                hoverinfo="skip"
-            )
-        )
-
-    # 가중치 조정 후 0.5 경계면
-    if after_inside:
-
-        fig.add_trace(
-            go.Isosurface(
-                x=xx.ravel(),
-                y=yy.ravel(),
-                z=zz.ravel(),
-                value=after_probability,
-                isomin=0.5,
-                isomax=0.5,
-                surface_count=1,
-                caps=dict(
-                    x_show=False,
-                    y_show=False,
-                    z_show=False
-                ),
-                colorscale=[
-                    [0, "#16A085"],
-                    [1, "#16A085"]
-                ],
-                showscale=False,
-                opacity=0.45,
-                name="가중치 조정 후 0.5 경계면",
-                hoverinfo="skip"
-            )
-        )
-
-    fig.update_layout(
-        title="3차원 산점도와 0.5 경계면",
-        scene=dict(
-            xaxis_title=FEATURE_LABELS[x_feature],
-            yaxis_title=FEATURE_LABELS[y_feature],
-            zaxis_title=FEATURE_LABELS[z_feature],
-        ),
-        legend_title="범례",
-        height=750,
-        template="plotly_white"
-    )
-
-    return fig, before_inside, after_inside
-
-
-# ==================================================
-# 10. 화면: 속성 선택
-# ==================================================
-
-st.divider()
-st.subheader("1. 입력으로 사용할 속성 선택")
-
-selected_features = st.multiselect(
-    "모델 학습에 사용할 속성을 선택하세요.",
-    options=list(FEATURE_LABELS.keys()),
-    default=[
-        "age",
-        "avg_glucose_level",
-        "hypertension",
-        "heart_disease"
-    ],
-    format_func=lambda x: FEATURE_LABELS[x]
+boundary_before = add_boundary_2d(
+    fig2d,
+    prob_before,
+    "가중치 조정 전 0.5 경계선",
+    "#f39c12"
 )
 
-if len(selected_features) < 2:
+boundary_after = add_boundary_2d(
+    fig2d,
+    prob_after,
+    "가중치 조정 후 0.5 경계선",
+    "#8e44ad"
+)
 
+
+fig2d.update_layout(
+    title="실제 결과와 로지스틱 회귀의 0.5 경계선",
+    xaxis_title=FEATURE_LABELS[x_feature],
+    yaxis_title=FEATURE_LABELS[y_feature],
+    height=650,
+    hovermode="closest",
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="left",
+        x=0
+    )
+)
+
+st.plotly_chart(fig2d, use_container_width=True)
+
+
+if not boundary_before:
     st.warning(
-        "산점도를 그리려면 속성을 최소 2개 선택해야 합니다."
+        "가중치 조정 전의 0.5 경계선은 현재 그림의 범위 밖에 있습니다."
     )
 
-    st.stop()
-
-
-# ==================================================
-# 11. 데이터 준비
-# ==================================================
-
-try:
-
-    data = load_data()
-
-    train_data, test_data = split_data(data)
-
-    X_train = train_data[selected_features].copy()
-    X_test = test_data[selected_features].copy()
-
-    y_train = train_data["stroke"].astype(int)
-    y_test = test_data["stroke"].astype(int)
-
-    if y_train.nunique() < 2:
-
-        st.error(
-            "훈련용 데이터에 뇌졸중 여부 두 종류가 모두 있어야 합니다."
-        )
-
-        st.stop()
-
-    models, scaler, X_train, X_test = train_models(
-        X_train,
-        X_test,
-        y_train
-    )
-
-except Exception as e:
-
-    st.error(f"데이터 처리 또는 모델 학습 오류: {e}")
-
-    st.stop()
-
-
-# ==================================================
-# 12. 테스트 데이터 정보
-# ==================================================
-
-st.divider()
-st.subheader("2. 테스트 데이터")
-
-test_positive_count = int((y_test == 1).sum())
-
-st.info(
-    f"테스트용 사람 수: **{len(test_data):,}명** "
-    f"| 실제 뇌졸중 환자: **{test_positive_count:,}명** "
-    f"| 훈련용 사람 수: **{len(train_data):,}명**"
-)
-
-
-# ==================================================
-# 13. 두 모델의 예측
-# ==================================================
-
-results = {}
-
-for model_type in ["logistic", "tree"]:
-
-    model_pair = models[model_type]
-
-    before_probability = get_probability(
-        model_pair["before"],
-        X_test,
-        model_type,
-        scaler
-    )
-
-    after_probability = get_probability(
-        model_pair["after"],
-        X_test,
-        model_type,
-        scaler
-    )
-
-    before_pred = (
-        before_probability >= 0.5
-    ).astype(int)
-
-    after_pred = (
-        after_probability >= 0.5
-    ).astype(int)
-
-    before_scores = calculate_scores(
-        y_test,
-        before_pred
-    )
-
-    after_scores = calculate_scores(
-        y_test,
-        after_pred
-    )
-
-    results[model_type] = {
-        "before_pred": before_pred,
-        "after_pred": after_pred,
-        "before_scores": before_scores,
-        "after_scores": after_scores,
-    }
-
-
-# ==================================================
-# 14. 로지스틱 회귀 비교
-# ==================================================
-
-st.divider()
-st.subheader("3. 로지스틱 회귀(확률로 답하는 모델)")
-
-st.write(
-    "가중치를 조정하기 전과 후의 혼동행렬과 "
-    "평가 지표를 비교합니다."
-)
-
-col1, col2 = st.columns(2)
-
-with col1:
-
-    st.markdown("**가중치 조정 전**")
-
-    st.table(
-        make_comparison_table(
-            results["logistic"]["before_scores"],
-            results["logistic"]["before_scores"]
-        ).iloc[:, :2]
-    )
-
-with col2:
-
-    st.markdown("**가중치 조정 후**")
-
-    st.table(
-        make_comparison_table(
-            results["logistic"]["before_scores"],
-            results["logistic"]["after_scores"]
-        ).iloc[:, [0, 2]].rename(
-            columns={"가중치 조정 후": "가중치 조정 후"}
-        )
-    )
-
-show_change(
-    results["logistic"]["before_scores"],
-    results["logistic"]["after_scores"]
-)
-
-
-# ==================================================
-# 15. 의사결정트리 비교
-# ==================================================
-
-st.divider()
-st.subheader("4. 의사결정트리(질문으로 답하는 모델)")
-
-st.write(
-    "가중치를 조정하기 전과 후의 혼동행렬과 "
-    "평가 지표를 비교합니다."
-)
-
-col1, col2 = st.columns(2)
-
-with col1:
-
-    st.markdown("**가중치 조정 전**")
-
-    st.table(
-        make_comparison_table(
-            results["tree"]["before_scores"],
-            results["tree"]["before_scores"]
-        ).iloc[:, :2]
-    )
-
-with col2:
-
-    st.markdown("**가중치 조정 후**")
-
-    st.table(
-        make_comparison_table(
-            results["tree"]["before_scores"],
-            results["tree"]["after_scores"]
-        ).iloc[:, [0, 2]]
-    )
-
-show_change(
-    results["tree"]["before_scores"],
-    results["tree"]["after_scores"]
-)
-
-
-# ==================================================
-# 16. 산점도에 사용할 축 선택
-# ==================================================
-
-st.divider()
-st.subheader("5. 산점도와 0.5 경계선")
-
-st.write(
-    "테스트용 사람들을 실제 뇌졸중 여부에 따라 색으로 구분합니다. "
-    "주황색은 가중치 조정 전 경계선, "
-    "초록색은 가중치 조정 후 경계선입니다."
-)
-
-if len(selected_features) == 2:
-
-    st.markdown("**2차원 산점도**")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        x_feature = st.selectbox(
-            "가로축 속성",
-            selected_features,
-            index=0,
-            format_func=lambda x: FEATURE_LABELS[x]
-        )
-
-    remaining_features = [
-        feature
-        for feature in selected_features
-        if feature != x_feature
-    ]
-
-    with col2:
-
-        y_feature = st.selectbox(
-            "세로축 속성",
-            remaining_features,
-            format_func=lambda x: FEATURE_LABELS[x]
-        )
-
-    selected_axes = [x_feature, y_feature]
-
-else:
-
-    st.markdown("**3차원 산점도**")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        x_feature = st.selectbox(
-            "가로축 속성",
-            selected_features,
-            index=0,
-            format_func=lambda x: FEATURE_LABELS[x]
-        )
-
-    remaining_1 = [
-        feature
-        for feature in selected_features
-        if feature != x_feature
-    ]
-
-    with col2:
-
-        y_feature = st.selectbox(
-            "세로축 속성",
-            remaining_1,
-            index=0,
-            format_func=lambda x: FEATURE_LABELS[x]
-        )
-
-    remaining_2 = [
-        feature
-        for feature in remaining_1
-        if feature != y_feature
-    ]
-
-    with col3:
-
-        z_feature = st.selectbox(
-            "깊이축 속성",
-            remaining_2,
-            index=0,
-            format_func=lambda x: FEATURE_LABELS[x]
-        )
-
-    selected_axes = [
-        x_feature,
-        y_feature,
-        z_feature
-    ]
-
-
-# ==================================================
-# 17. 모델별 산점도
-# ==================================================
-
-model_choice = st.selectbox(
-    "산점도로 확인할 모델",
-    options=["logistic", "tree"],
-    format_func=lambda x: MODEL_NAMES[x]
-)
-
-model_pair = models[model_choice]
-
-if len(selected_axes) == 2:
-
-    fig, before_inside, after_inside = make_2d_chart(
-        X_test,
-        y_test,
-        model_pair,
-        scaler,
-        selected_axes,
-        model_choice
-    )
-
-else:
-
-    fig, before_inside, after_inside = make_3d_chart(
-        X_test,
-        y_test,
-        model_pair,
-        scaler,
-        selected_axes,
-        model_choice
-    )
-
-
-st.plotly_chart(
-    fig,
-    use_container_width=True
-)
-
-
-# ==================================================
-# 18. 경계선이 그림 밖에 있는지 안내
-# ==================================================
-
-if not before_inside:
-
+if not boundary_after:
     st.warning(
-        "가중치 조정 전의 0.5 경계선은 "
-        "현재 그림의 범위 밖에 있습니다."
+        "가중치 조정 후의 0.5 경계선은 현재 그림의 범위 밖에 있습니다."
     )
 
-if not after_inside:
+st.caption("""
+주황색 점선: 가중치 조정 전
+보라색 점선: 가중치 조정 후
+파란색 점: 실제 뇌졸중 아님
+빨간색 점: 실제 뇌졸중
+""")
 
-    st.warning(
-        "가중치 조정 후의 0.5 경계선은 "
-        "현재 그림의 범위 밖에 있습니다."
+
+# --------------------------------------------------
+# 12. 3차원 산점도 및 0.5 평면
+# --------------------------------------------------
+
+if len(selected_features) >= 3:
+
+    st.divider()
+    st.subheader("⑤ 3차원 산점도와 0.5 경계 평면")
+
+    st.markdown("""
+    속성을 세 가지 골라 3차원 공간에서 살펴봅니다.
+
+    마우스로 그림을 드래그하면 여러 방향에서 회전하여 볼 수 있습니다.
+    """)
+    
+    axis_3d = st.multiselect(
+        "3차원 그래프의 축으로 사용할 속성 세 가지를 선택하세요.",
+        options=selected_features,
+        default=selected_features[:3],
+        max_selections=3,
+        format_func=lambda x: FEATURE_LABELS[x],
+        key="axis_3d"
     )
 
+    if len(axis_3d) == 3:
 
-# ==================================================
-# 19. 설명
-# ==================================================
+        x3, y3, z3 = axis_3d
+
+        fig3d = go.Figure()
+
+        # 로지스틱 회귀의 실제 계수와 절편
+        coef_before, intercept_before = get_logistic_equation(
+            logistic_before
+        )
+
+        coef_after, intercept_after = get_logistic_equation(
+            logistic_after
+        )
+
+        # 두 평면을 그리기 위한 x, y 격자
+        x3_min = float(X_test[x3].min())
+        x3_max = float(X_test[x3].max())
+
+        y3_min = float(X_test[y3].min())
+        y3_max = float(X_test[y3].max())
+
+        z3_min = float(X_test[z3].min())
+        z3_max = float(X_test[z3].max())
+
+        if x3_min == x3_max:
+            x3_min -= 0.5
+            x3_max += 0.5
+
+        if y3_min == y3_max:
+            y3_min -= 0.5
+            y3_max += 0.5
+
+        if z3_min == z3_max:
+            z3_min -= 0.5
+            z3_max += 0.5
+
+        gx = np.linspace(x3_min, x3_max, 35)
+        gy = np.linspace(y3_min, y3_max, 35)
+
+        xx3, yy3 = np.meshgrid(gx, gy)
+
+        # 선택하지 않은 속성은 훈련 데이터 중앙값으로 고정
+        def calculate_plane(coefficients, intercept):
+
+            ix = selected_features.index(x3)
+            iy = selected_features.index(y3)
+            iz = selected_features.index(z3)
+
+            ax = coefficients[ix]
+            ay = coefficients[iy]
+            az = coefficients[iz]
+
+            # 선택한 세 속성 이외의 항목을 상수로 계산
+            constant = intercept
+
+            for i, feature in enumerate(selected_features):
+                if feature not in [x3, y3, z3]:
+                    constant += (
+                        coefficients[i]
+                        * train_medians[feature]
+                    )
+
+            if abs(az) < 1e-10:
+                return None, False
+
+            zz3 = -(
+                constant
+                + ax * xx3
+                + ay * yy3
+            ) / az
+
+            # 그림의 z축 범위 안에 들어오는 부분만 표시
+            visible = (
+                (zz3 >= z3_min)
+                & (zz3 <= z3_max)
+            )
+
+            if not np.any(visible):
+                return None, False
+
+            zz_visible = np.where(visible, zz3, np.nan)
+
+            return zz_visible, True
+
+
+        plane_before, visible_before = calculate_plane(
+            coef_before,
+            intercept_before
+        )
+
+        plane_after, visible_after = calculate_plane(
+            coef_after,
+            intercept_after
+        )
+
+
+        # 평면을 먼저 그려서 점이 잘 보이도록 함
+        if visible_before:
+            fig3d.add_trace(
+                go.Surface(
+                    x=xx3,
+                    y=yy3,
+                    z=plane_before,
+                    name="가중치 조정 전 0.5 평면",
+                    opacity=0.45,
+                    colorscale=[
+                        [0, "#f39c12"],
+                        [1, "#f39c12"]
+                    ],
+                    showscale=False,
+                    connectgaps=False,
+                    hoverinfo="skip"
+                )
+            )
+
+        if visible_after:
+            fig3d.add_trace(
+                go.Surface(
+                    x=xx3,
+                    y=yy3,
+                    z=plane_after,
+                    name="가중치 조정 후 0.5 평면",
+                    opacity=0.45,
+                    colorscale=[
+                        [0, "#8e44ad"],
+                        [1, "#8e44ad"]
+                    ],
+                    showscale=False,
+                    connectgaps=False,
+                    hoverinfo="skip"
+                )
+            )
+
+
+        # 실제 뇌졸중 여부에 따라 점 표시
+        for label, color, name in [
+            (0, "#3498db", "실제 뇌졸중 아님"),
+            (1, "#e74c3c", "실제 뇌졸중")
+        ]:
+
+            mask = y_test == label
+
+            fig3d.add_trace(
+                go.Scatter3d(
+                    x=X_test.loc[mask, x3],
+                    y=X_test.loc[mask, y3],
+                    z=X_test.loc[mask, z3],
+                    mode="markers",
+                    name=name,
+                    marker=dict(
+                        size=4 if label == 0 else 5,
+                        color=color,
+                        opacity=0.7
+                    )
+                )
+            )
+
+
+        fig3d.update_layout(
+            title="실제 뇌졸중 여부와 로지스틱 회귀의 0.5 평면",
+            height=750,
+            scene=dict(
+                xaxis_title=FEATURE_LABELS[x3],
+                yaxis_title=FEATURE_LABELS[y3],
+                zaxis_title=FEATURE_LABELS[z3],
+                aspectmode="auto"
+            ),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0
+            )
+        )
+
+        st.plotly_chart(
+            fig3d,
+            use_container_width=True
+        )
+
+        if not visible_before:
+            st.warning(
+                "가중치 조정 전의 0.5 평면은 현재 3차원 그림의 범위 밖에 있습니다."
+            )
+
+        if not visible_after:
+            st.warning(
+                "가중치 조정 후의 0.5 평면은 현재 3차원 그림의 범위 밖에 있습니다."
+            )
+
+        if visible_before or visible_after:
+            st.caption("""
+            주황색 평면: 가중치 조정 전
+            보라색 평면: 가중치 조정 후
+            파란색 점: 실제 뇌졸중 아님
+            빨간색 점: 실제 뇌졸중
+            """)
+
+    else:
+        st.info("3차원 그래프를 보려면 속성을 세 가지 선택하세요.")
+
+
+# --------------------------------------------------
+# 13. 마무리
+# --------------------------------------------------
 
 st.divider()
-st.subheader("6. 결과 이해하기")
 
-st.markdown(
-    """
-    **가중치 조정이란?**
+st.subheader("⑥ 생각해 보기")
 
-    뇌졸중을 겪은 사람은 전체 데이터에서 차지하는 비율이 매우 낮습니다.
+st.markdown("""
+다음 질문을 생각해 보세요.
 
-    그래서 모델이 모든 사람을 뇌졸중이 아니라고 예측해도
-    정확도가 높게 나올 수 있습니다.
+1. 가중치를 조정한 뒤 실제 뇌졸중 환자를 더 많이 찾아냈나요?
+2. 환자를 더 많이 찾아내는 대신 헛짚은 사람도 늘어났나요?
+3. 정확도와 재현율 중 어떤 지표가 이 문제에서 더 중요할까요?
+4. 가중치를 조정하는 것이 모든 모델에서 똑같은 효과를 냈나요?
 
-    `class_weight="balanced"`를 사용하면
-    적은 수의 뇌졸중 환자를 틀렸을 때 더 큰 벌점을 주도록 학습합니다.
-
-    **결과를 살펴볼 때 주의할 점**
-
-    - 찾아낸 환자(TP)가 늘어나면 실제 환자를 더 많이 찾아낸 것입니다.
-    - 놓친 환자(FN)가 줄어들면 실제 환자를 놓치는 경우가 줄어든 것입니다.
-    - 헛짚은 사람(FP)이 늘어나면 실제 환자가 아닌 사람을 환자로 예측하는 경우가 늘어난 것입니다.
-    - 재현율이 높아져도 정밀도나 정확도가 낮아질 수 있습니다.
-    - 가중치를 조정했다고 해서 모든 평가 지표가 좋아지는 것은 아닙니다.
-
-    **0.5 경계선이란?**
-
-    모델이 뇌졸중일 확률을 계산했을 때,
-    확률이 0.5 이상이면 뇌졸중으로 예측하고
-    0.5 미만이면 뇌졸중이 아닌 것으로 예측합니다.
-
-    그래프의 경계선은 이 두 예측이 나뉘는 위치입니다.
-
-    ※ 이 페이지는 머신러닝 학습 실습용이며,
-    실제 의료 진단을 대신하지 않습니다.
-    """
-)
-
-**파일 위치**
-
-```text
-프로젝트/
-├── main.py
-├── requirements.txt
-└── pages/
-    ├── 2_분류_모델.py
-    ├── 3_채점표.py
-    └── 4_성능_높이기.py
+**가중치 조정의 핵심은 단순히 정확도를 높이는 것이 아니라,
+드문 양성 사례를 놓치지 않도록 모델의 판단을 조정하는 것입니다.**
+""")
